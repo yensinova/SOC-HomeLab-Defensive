@@ -1,0 +1,34 @@
+# =====================================================
+# REGLAS DE DETECCION - SOC HOME LAB (Splunk 10.4.1)
+# Autor: Yensi Jesús González Nova
+# Las lineas con # son comentarios de documentacion
+# =====================================================
+
+# --- R-01: Forwarders conectados al Indexer ---
+index=_internal group=tcpin_connections
+| stats latest(_time) as ultima_conexion by sourceHost, sourceIp
+
+# --- R-02: Volumen de ingesta por indice y sourcetype ---
+index=wineventlog OR index=sysmon
+| stats count by index, sourcetype
+
+# --- R-03: Fuerza bruta / Password Spraying (Event 4625) ---
+# MITRE T1110 - Alerta si >=3 fallos por cuenta e IP en la ventana
+index=wineventlog EventCode=4625
+| stats count as Failed_Attempts, values(Logon_Type) as Logon_Types, earliest(_time) as First_Time, latest(_time) as Last_Time by Account_Name, Source_Network_Address
+| where Failed_Attempts >= 3 AND Account_Name != "-"
+| eval First_Time=strftime(First_Time, "%H:%M:%S"), Last_Time=strftime(Last_Time, "%H:%M:%S")
+| sort - Failed_Attempts
+
+# --- R-04: PowerShell ofuscado / fileless (4104 + Sysmon 1) ---
+# MITRE T1059.001 / T1027
+(index=wineventlog EventCode=4104) OR (index=sysmon EventCode=1 Image="*powershell.exe*") earliest=-4h
+| search CommandLine="*EncodedCommand*" OR CommandLine="*Invoke-WebRequest*" OR CommandLine="*DownloadString*" OR CommandLine="*Net.WebClient*" OR ScriptBlockText="*DownloadString*"
+| table _time, host, EventCode, User, ScriptBlockText, CommandLine
+| sort - _time
+
+# --- R-05: Logon exitoso tras fallos (posible compromiso) ---
+# Correlacion 4625 -> 4624 de la misma cuenta en 10 minutos
+index=wineventlog (EventCode=4625 OR EventCode=4624)
+| stats earliest(EventCode) as primero, latest(EventCode) as ultimo, count by Account_Name, Source_Network_Address
+| where primero=4625 AND ultimo=4624
